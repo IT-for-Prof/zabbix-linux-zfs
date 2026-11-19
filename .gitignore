@@ -1,0 +1,11 @@
+# В репозиторий попадает только перечисленное ниже, всё остальное игнорируется.
+*
+!.gitignore
+!LICENSE
+!README.md
+!README_EN.md
+!template/
+!template/linux_zfs.yaml
+!template/linux_zfs_en.yaml
+!tests/
+!tests/test_template.py

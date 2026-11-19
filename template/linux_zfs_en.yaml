@@ -1,0 +1,133 @@
+zabbix_export:
+  version: '8.0'
+  template_groups:
+    - uuid: 1d9c5416b33343fa94a09c66b4ed9e22
+      name: 'Templates/Operating systems'
+  templates:
+    - uuid: 8b54bd13a1b14830bbb08451ae306e85
+      template: 'Linux ZFS by Zabbix agent active'
+      name: 'Linux ZFS by Zabbix agent active'
+      description: |
+        OpenZFS pools on Linux with stock agent keys, no UserParameter and no sudo:
+        - the state of each pool from /proc/spl/kstat/zfs/<pool>/state, pools are discovered once an hour;
+        - zpool status -x output every 5 minutes: READ/WRITE/CKSUM errors and corrupted data.
+        Triggers: pool is degraded (Average), pool has failed (High), no data for {$ZFS.NODATA} (High, depends on agent availability), errors on an ONLINE pool (Average). The template does not track pool space; Linux by Zabbix agent active does.
+
+        Requirements: Zabbix 8.0; Zabbix agent 2 in active mode; Linux by Zabbix agent active linked to the host; the agent config line AllowKey=system.run[/usr/sbin/zpool status -x].
+        Check on the host: zabbix_agent2 -t 'system.run[/usr/sbin/zpool status -x]'
+
+        Author:  Konstantin Tyutyunnik / Константин Тютюнник
+        Site:    https://itforprof.com
+        Repo:    https://github.com/IT-for-Prof/zabbix-linux-zfs
+        License: MIT (c) 2026 Konstantin Tyutyunnik
+      vendor:
+        name: itforprof.com
+        version: 1.0.0
+      groups:
+        - name: 'Templates/Operating systems'
+      items:
+        - uuid: 75dfaab2f27a4989810ed9c14e4faf91
+          name: 'ZFS: zpool status -x output'
+          type: ZABBIX_ACTIVE
+          key: 'system.run[/usr/sbin/zpool status -x]'
+          delay: 5m
+          history: 90d
+          value_type: TEXT
+          trends: '0'
+          description: 'Normal: all pools are healthy.'
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: zfs
+          triggers:
+            - uuid: 2670638a8b31493797493fd35035e3e0
+              expression: 'find(/Linux ZFS by Zabbix agent active/system.run[/usr/sbin/zpool status -x],,"like","state: ONLINE")=1 and find(/Linux ZFS by Zabbix agent active/system.run[/usr/sbin/zpool status -x],,"like","One or more devices has experienced")=1'
+              name: 'ZFS: errors on an ONLINE pool'
+              opdata: '{ITEM.VALUE}'
+              priority: AVERAGE
+              description: 'Check: zpool status -v'
+              tags:
+                - tag: component
+                  value: zfs
+                - tag: scope
+                  value: failure
+      discovery_rules:
+        - uuid: 50ae0c6f8bd14abb800c5281ca9f1f97
+          name: 'ZFS: pool discovery'
+          type: ZABBIX_ACTIVE
+          key: 'vfs.dir.get[/proc/spl/kstat/zfs,,"^\$import$",dir,,0]'
+          delay: 1h
+          lifetime: 30d
+          enabled_lifetime_type: DISABLE_NEVER
+          description: '$import is the temporary pool of zpool import.'
+          item_prototypes:
+            - uuid: 03dffd89230844fe8230fbe49b772745
+              name: 'ZFS {#POOLNAME}: state'
+              type: ZABBIX_ACTIVE
+              key: 'vfs.file.contents[/proc/spl/kstat/zfs/{#POOLNAME}/state]'
+              delay: 1m
+              history: 90d
+              value_type: CHAR
+              description: 'Hot spares are not part of the pool state.'
+              tags:
+                - tag: component
+                  value: zfs
+                - tag: zpool
+                  value: '{#POOLNAME}'
+              trigger_prototypes:
+                - uuid: 8bcdf92c04b244899048bee6424da703
+                  expression: 'count(/Linux ZFS by Zabbix agent active/vfs.file.contents[/proc/spl/kstat/zfs/{#POOLNAME}/state],#2,"eq","DEGRADED")=2'
+                  name: 'ZFS {#POOLNAME}: pool is degraded'
+                  opdata: '{ITEM.VALUE}'
+                  priority: AVERAGE
+                  description: 'Check: zpool status {#POOLNAME}'
+                  tags:
+                    - tag: component
+                      value: zfs
+                    - tag: zpool
+                      value: '{#POOLNAME}'
+                    - tag: scope
+                      value: failure
+                - uuid: 2e062b8d45634aff9a1c438e0cedbde7
+                  expression: 'count(/Linux ZFS by Zabbix agent active/vfs.file.contents[/proc/spl/kstat/zfs/{#POOLNAME}/state],#2,"regexp","^(ONLINE|DEGRADED)$")=0'
+                  name: 'ZFS {#POOLNAME}: pool has failed'
+                  opdata: '{ITEM.VALUE}'
+                  priority: HIGH
+                  description: 'Check: zpool status {#POOLNAME}'
+                  tags:
+                    - tag: component
+                      value: zfs
+                    - tag: zpool
+                      value: '{#POOLNAME}'
+                    - tag: scope
+                      value: failure
+                - uuid: 984883cca496413bae7dd1c44ad23b7d
+                  expression: 'nodata(/Linux ZFS by Zabbix agent active/vfs.file.contents[/proc/spl/kstat/zfs/{#POOLNAME}/state],{$ZFS.NODATA})=1'
+                  name: 'ZFS {#POOLNAME}: no data for {$ZFS.NODATA}'
+                  priority: HIGH
+                  description: 'Check: zpool list; zpool import'
+                  dependencies:
+                    - name: 'Linux: Zabbix agent is not available'
+                      expression: 'nodata(/Linux by Zabbix agent active/agent.ping,{$AGENT.NODATA_TIMEOUT})=1'
+                  tags:
+                    - tag: component
+                      value: zfs
+                    - tag: zpool
+                      value: '{#POOLNAME}'
+                    - tag: scope
+                      value: availability
+          lld_macro_paths:
+            - lld_macro: '{#POOLNAME}'
+              path: $.basename
+      tags:
+        - tag: class
+          value: os
+        - tag: target
+          value: linux
+      macros:
+        - macro: '{$ZFS.NODATA}'
+          value: 35m
+          description: 'Longer than {$AGENT.NODATA_TIMEOUT} plus the item interval.'
