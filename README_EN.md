@@ -33,6 +33,13 @@ Community ZFS templates use UserParameter and `sudo zpool`. This one does not:
 | `zpool status -x` output | `system.run[/usr/sbin/zpool status -x]` | 5m |
 
 `zpool import` creates the `$import` directory while it searches for pools, and discovery skips it.
+If the agent cannot run `zpool status -x`, the preprocessing step "Check for not supported value" stores
+the value `ZFS_NOT_COLLECTED` instead of the error. The "Matches regular expression" step sets the same marker
+when the output does not look like a `zpool` answer: `system.run` returns text, not an exit code, so
+`sh: …: not found` would otherwise be stored as an ordinary value. While the last value is the marker, open
+problems stay open: both triggers of the item have a recovery expression. The item does not become unsupported, so the trigger on
+that value fires: on an unsupported item, triggers go to the unknown state and raise no alert.
+
 Unchanged `zpool status -x` output is stored once a day. The pool state is stored every minute: the
 "no data" trigger watches that item, and it would count a discarded repeat as missing data.
 
@@ -44,6 +51,7 @@ Unchanged `zpool status -x` output is stored once a day. The pool state is store
 | `ZFS {#POOLNAME}: pool has failed` | High | two values in a row are neither `ONLINE` nor `DEGRADED`: `FAULTED`, `UNAVAIL`, `SUSPENDED` and others |
 | `ZFS {#POOLNAME}: no data for {$ZFS.NODATA}` | High | the state file has been missing for 35 minutes: the pool was exported or not imported after a reboot |
 | `ZFS: errors on an ONLINE pool` | Average | `zpool status -x` reports READ/WRITE/CKSUM errors or corrupted data on a pool that is still `ONLINE` |
+| `ZFS: zpool status -x is not collected` | Average | for 10 minutes the agent cannot run `zpool status -x`: no `AllowKey` line, no `zpool`, or `DenyKey` forbids the command |
 
 - **Two values in a row.** While a pool is imported after boot, it briefly shows `TRANSITIONING`.
   A single such value does not raise a trigger.
@@ -107,7 +115,6 @@ items appear within an hour of linking.
 - **Hot spares.** They are not part of the pool state and `zpool status -x` does not check them. A failed spare
   shows up only in the disk's SMART.
 - **Age of the last scrub.** There is no stock source without root.
-- **A lost `AllowKey` line.** The `zpool status -x` item becomes unsupported, and no alert fires.
 - **Precision on a host with several pools.** The error trigger checks the whole `zpool status -x` output,
   not each pool. If one pool is degraded with disk errors while another is `ONLINE` and resilvering, the
   error trigger fires when it should not.
@@ -119,7 +126,7 @@ python3 -m pytest -q tests
 ```
 
 The tests check the "no data" dependency and its window, the severity for each OpenZFS pool state, the
-error trigger against sample `zpool status -x` output, and that the Russian and English versions differ
+error trigger against sample `zpool status -x` output, the trigger on lost collection, and that the Russian and English versions differ
 only in their texts.
 
 ## License

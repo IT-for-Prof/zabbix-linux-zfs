@@ -34,6 +34,19 @@ def _items(tpl: dict) -> list[tuple[dict, list[dict]]]:
     return rows
 
 
+def _not_collected_marker(item: dict) -> str | None:
+    """Значение, которое шаг «Check for not supported value» пишет вместо ошибки сбора."""
+    steps = item.get("preprocessing", [])
+    if steps and steps[0]["type"] == "CHECK_NOT_SUPPORTED" and steps[0].get("error_handler") == "CUSTOM_VALUE":
+        return steps[0]["error_handler_params"]
+    return None
+
+
+def _zpool_item(tpl: dict) -> dict:
+    (item,) = [item for item, _ in _items(tpl) if item["key"] == ZPOOL_STATUS_KEY]
+    return item
+
+
 def _key_params(key: str) -> list[str]:
     return next(csv.reader([key[key.index("[") + 1:-1]]))
 
@@ -76,7 +89,7 @@ class BehaviourTests(unittest.TestCase):
             with self.subTest(lang=lang):
                 tpl = _template(lang)
                 window = _seconds({m["macro"]: m["value"] for m in tpl["macros"]}["{$ZFS.NODATA}"])
-                nodata = [(item, trig) for item, trigs in _items(tpl) for trig in trigs if "nodata(" in trig["expression"]]
+                nodata = [(item, trig) for item, trigs in _items(tpl) for trig in trigs if trig["expression"].startswith("nodata(")]
                 self.assertEqual(len(nodata), 1)
                 item, trig = nodata[0]
                 self.assertEqual([d["name"] for d in trig.get("dependencies", [])], [AGENT_TRIGGER])
@@ -116,7 +129,8 @@ class BehaviourTests(unittest.TestCase):
         # resilver, ashift, errata. Застрявший на них триггер скрыл бы следующую настоящую ошибку.
         tpl = _template("ru")
         self.assertIn(ZPOOL_STATUS_KEY, [item["key"] for item, _ in _items(tpl)])
-        (trig,) = [t for item, trigs in _items(tpl) if item["key"] == ZPOOL_STATUS_KEY for t in trigs]
+        (trig,) = [t for item, trigs in _items(tpl) if item["key"] == ZPOOL_STATUS_KEY for t in trigs
+                   if "One or more devices" in t["expression"]]
         needles = re.findall(r',,"like","([^"]+)"\)=1', trig["expression"])
         self.assertEqual(len(needles), trig["expression"].count("find("))
         self.assertEqual(trig["expression"].count(" and "), len(needles) - 1)
@@ -124,6 +138,7 @@ class BehaviourTests(unittest.TestCase):
         corrupt = "One or more devices has experienced an error resulting in data\n\tcorruption."
         outputs = {
             "all pools are healthy": False,
+            "ZFS_NOT_COLLECTED": False,
             f"  pool: p\n state: ONLINE\nstatus: {errors}": True,
             f"  pool: p\n state: ONLINE\nstatus: {corrupt}": True,
             "  pool: p\n state: ONLINE\nstatus: One or more devices is currently being resilvered.": False,
@@ -134,6 +149,55 @@ class BehaviourTests(unittest.TestCase):
         for output, fires in outputs.items():
             with self.subTest(output=output.splitlines()[-1][:60]):
                 self.assertEqual(all(n in output for n in needles), fires)
+
+    def test_every_triggered_item_reports_lost_collection(self):
+        # У unsupported-элемента find() и count() уходят в Unknown, и алерта нет. Потерю сбора видно
+        # либо по триггеру «нет данных», либо по маркеру из шага «Check for not supported value».
+        for item, trigs in _items(_template("ru")):
+            if not trigs:
+                continue
+            with self.subTest(key=item["key"]):
+                marker = _not_collected_marker(item)
+                self.assertTrue(any(t["expression"].startswith("nodata(") for t in trigs)
+                                or (marker is not None and any(f')="{marker}"' in t["expression"] for t in trigs)))
+
+    def test_not_collected_trigger_waits_for_agent_trigger(self):
+        item = _zpool_item(_template("ru"))
+        marker = _not_collected_marker(item)
+        # Значение «ZBX_NOTSUPPORTED» сервер считает ошибкой сбора, и элемент с таким маркером становится unsupported.
+        self.assertNotIn(marker, (None, "ZBX_NOTSUPPORTED"))
+        (trig,) = [t for t in item["triggers"] if f'"{marker}"' in t["expression"]]
+        self.assertEqual([d["name"] for d in trig.get("dependencies", [])], [AGENT_TRIGGER])
+        # Повторы маркера отбрасываются, поэтому «держится 10 минут» — это nodata, а не count(#2).
+        self.assertIn("nodata(", trig["expression"])
+
+    def test_unexpected_zpool_output_becomes_marker(self):
+        # system.run отдаёт вывод, а не код выхода: «zpool: not found» иначе сохранился бы как обычный текст.
+        item = _zpool_item(_template("ru"))
+        marker = _not_collected_marker(item)
+        (check,) = [s for s in item["preprocessing"] if s["type"] == "MATCHES_REGEX"]
+        self.assertEqual((check.get("error_handler"), check.get("error_handler_params")), ("CUSTOM_VALUE", marker))
+        outputs = {
+            "all pools are healthy": True,
+            "no pools available": True,
+            "  pool: p\n state: ONLINE\nstatus: One or more devices has experienced an unrecoverable error.": True,
+            "sh: 1: /usr/sbin/zpool: not found": False,
+            "sh: 1: zpool: not found\n  pool: p": False,
+            "": False,
+        }
+        for output, valid in outputs.items():
+            with self.subTest(output=output[:40]):
+                self.assertEqual(bool(re.search(check["parameters"][0], output, re.M)), valid)  # Zabbix: PCRE2_MULTILINE
+
+    def test_marker_keeps_problems_open(self):
+        # Маркер повторно сохраняется heartbeat'ом и после рестарта сервера: без выражения восстановления
+        # «не собирается» закрывался бы и открывался заново, а «ошибки на пуле» закрывался бы ложно.
+        item = _zpool_item(_template("ru"))
+        marker = _not_collected_marker(item)
+        for trig in item["triggers"]:
+            with self.subTest(trigger=trig["expression"][:40]):
+                self.assertEqual(trig.get("recovery_mode"), "RECOVERY_EXPRESSION")
+                self.assertIn(f')<>"{marker}"', trig["recovery_expression"])
 
     def test_no_filesystem_space_items(self):
         self.assertFalse([item["key"] for item, _ in _items(_template("ru")) if item["key"].startswith("vfs.fs.")],

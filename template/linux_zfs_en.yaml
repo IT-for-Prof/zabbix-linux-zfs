@@ -11,7 +11,7 @@ zabbix_export:
         OpenZFS pools on Linux with stock agent keys, no UserParameter and no sudo:
         - the state of each pool from /proc/spl/kstat/zfs/<pool>/state, pools are discovered once an hour;
         - zpool status -x output every 5 minutes: READ/WRITE/CKSUM errors and corrupted data.
-        Triggers: pool is degraded (Average), pool has failed (High), no data for {$ZFS.NODATA} (High, depends on agent availability), errors on an ONLINE pool (Average). The template does not track pool space; Linux by Zabbix agent active does.
+        Triggers: pool is degraded (Average), pool has failed (High), no data for {$ZFS.NODATA} (High, depends on agent availability), errors on an ONLINE pool (Average), zpool status -x is not collected (Average). The template does not track pool space; Linux by Zabbix agent active does.
 
         Requirements: Zabbix 8.0; Zabbix agent 2 in active mode; Linux by Zabbix agent active linked to the host; the agent config line AllowKey=system.run[/usr/sbin/zpool status -x].
         Check on the host: zabbix_agent2 -t 'system.run[/usr/sbin/zpool status -x]'
@@ -22,7 +22,7 @@ zabbix_export:
         License: MIT (c) 2026 Konstantin Tyutyunnik
       vendor:
         name: itforprof.com
-        version: 1.0.0
+        version: 1.0.1
       groups:
         - name: 'Templates/Operating systems'
       items:
@@ -34,8 +34,18 @@ zabbix_export:
           history: 90d
           value_type: TEXT
           trends: '0'
-          description: 'Normal: all pools are healthy.'
+          description: 'Normal: all pools are healthy. ZFS_NOT_COLLECTED means the value could not be collected.'
           preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '-1'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: ZFS_NOT_COLLECTED
+            - type: MATCHES_REGEX
+              parameters:
+                - '\A(all pools are healthy|no pools available|\s+pool: )'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: ZFS_NOT_COLLECTED
             - type: DISCARD_UNCHANGED_HEARTBEAT
               parameters:
                 - 1d
@@ -43,8 +53,25 @@ zabbix_export:
             - tag: component
               value: zfs
           triggers:
+            - uuid: 7f6964c86c664ae483a316c2988ffec0
+              expression: 'last(/Linux ZFS by Zabbix agent active/system.run[/usr/sbin/zpool status -x])="ZFS_NOT_COLLECTED" and nodata(/Linux ZFS by Zabbix agent active/system.run[/usr/sbin/zpool status -x],10m)=1'
+              recovery_mode: RECOVERY_EXPRESSION
+              recovery_expression: 'last(/Linux ZFS by Zabbix agent active/system.run[/usr/sbin/zpool status -x])<>"ZFS_NOT_COLLECTED"'
+              name: 'ZFS: zpool status -x is not collected'
+              priority: AVERAGE
+              description: 'Check: AllowKey in the agent config; zabbix_agent2 -t ''system.run[/usr/sbin/zpool status -x]'''
+              dependencies:
+                - name: 'Linux: Zabbix agent is not available'
+                  expression: 'nodata(/Linux by Zabbix agent active/agent.ping,{$AGENT.NODATA_TIMEOUT})=1'
+              tags:
+                - tag: component
+                  value: zfs
+                - tag: scope
+                  value: availability
             - uuid: 2670638a8b31493797493fd35035e3e0
               expression: 'find(/Linux ZFS by Zabbix agent active/system.run[/usr/sbin/zpool status -x],,"like","state: ONLINE")=1 and find(/Linux ZFS by Zabbix agent active/system.run[/usr/sbin/zpool status -x],,"like","One or more devices has experienced")=1'
+              recovery_mode: RECOVERY_EXPRESSION
+              recovery_expression: 'last(/Linux ZFS by Zabbix agent active/system.run[/usr/sbin/zpool status -x])<>"ZFS_NOT_COLLECTED" and (find(/Linux ZFS by Zabbix agent active/system.run[/usr/sbin/zpool status -x],,"like","state: ONLINE")=0 or find(/Linux ZFS by Zabbix agent active/system.run[/usr/sbin/zpool status -x],,"like","One or more devices has experienced")=0)'
               name: 'ZFS: errors on an ONLINE pool'
               opdata: '{ITEM.VALUE}'
               priority: AVERAGE
